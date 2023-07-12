@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch import nn
+from einops import rearrange
 
 from transformers.models.vit.configuration_vit import ViTConfig
 from transformers.models.vit.modeling_vit import ViTForMaskedImageModeling
@@ -10,13 +11,41 @@ from transformers.models.vit.modeling_vit import ViTForMaskedImageModeling
 from models.ConvT_generator import GlobalDecoder
 
 class InViT(ViTForMaskedImageModeling):
+    '''
+    https://huggingface.co/docs/transformers/model_doc/vit_mae#transformers.TFViTMAEForPreTraining
+    '''
+
     def __init__(
         self, 
         config: ViTConfig, 
-        do_global_reconstruction = False
+        do_global_reconstruction = False,
+        do_patchwise_deconvolution = False
     ) -> None:
         
         super().__init__(config)
+
+        self.do_patchwise_deconvolution = do_patchwise_deconvolution
+        if not do_patchwise_deconvolution:
+            # transformers original code
+            self.decoder = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=config.hidden_size,
+                    out_channels=config.encoder_stride**2 * config.num_channels,
+                    kernel_size=1,
+                ),
+                nn.PixelShuffle(config.encoder_stride),
+            )
+        else:
+            self.decoder = nn.Sequential(
+                nn.ConvTranspose2d(256, 32, (4, 4), stride=4),
+                nn.BatchNorm2d(32),
+                nn.GELU(),
+                nn.ConvTranspose2d(32, 8, (4, 4), stride=4),
+                nn.BatchNorm2d(8),
+                nn.GELU(),
+                nn.ConvTranspose2d(8, 1, (2, 2), stride=2),
+                nn.Tanh(),
+            )
 
         self.do_global_reconstruction = do_global_reconstruction
         if do_global_reconstruction:
@@ -48,14 +77,22 @@ class InViT(ViTForMaskedImageModeling):
         sequence_output = sequence_output[:, 1:]
         batch_size, sequence_length, num_channels = sequence_output.shape
         height = width = math.floor(sequence_length**0.5)
+        size = self.config.image_size // self.config.patch_size
         sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
 
-        # Reconstruct pixel values
-        reconstructed_pixel_values = self.decoder(sequence_output)
+        # Reconstruct patch pixel values
+        if self.do_patchwise_deconvolution:
+            sequence_output = rearrange(sequence_output, "b c h w -> (b h w) c 1 1")
+            sequence_output = self.decoder(sequence_output)
+            reconstructed_pixel_values = rearrange(sequence_output, "(b h w) u p1 p2 -> b u (p1 h) (p2 w)", 
+                                        u=self.config.num_channels, p1=self.config.patch_size, p2=self.config.patch_size,
+                                        h=size, w=size
+                                        )
+        else:
+            reconstructed_pixel_values = self.decoder(sequence_output)
 
         masked_patch_loss = None
         if bool_masked_pos is not None:
-            size = self.config.image_size // self.config.patch_size
             bool_masked_pos = bool_masked_pos.reshape(-1, size, size)
             mask = (
                 bool_masked_pos.repeat_interleave(self.config.patch_size, 1)
