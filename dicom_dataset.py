@@ -63,8 +63,16 @@ class DicomDataset(IterableDataset):
         return length
 
     def __iter__(self):
-        self.h5_iterator = iter(self.h5_files) #possible de shuffler ici, pas fait pour l'instant pcq je suis un thug
-        
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:  # single-process data loading, return the full iterator
+            worker_id = 0
+            worker_total_num = 1
+        else:  # in a worker process
+            worker_id = worker_info.id
+            worker_total_num = worker_info.num_workers
+
+        self.h5_iterator = iter(self.h5_files[worker_id::worker_total_num])  # Split the files among the workers
+
         for hdf5_path in self.h5_iterator:
             try:
                 hdf5_file = h5py.File(hdf5_path, "r")
@@ -81,7 +89,7 @@ class DicomDataset(IterableDataset):
                 for image_id in image_ids:
                     image = torch.tensor(hdf5_file[image_id][...], device=self.device)
                     break #first image only for now
-            
+
                 # multi expert label
                 target = self.study2labels.get(int(study_id[1:]), False)
                 if not target:
@@ -95,27 +103,23 @@ class DicomDataset(IterableDataset):
                 yield sample
 
 def collate_fn(batch):
-    text_tokens = [item['text'] for item in batch]
-    text_tokens = pad_sequence(text_tokens, batch_first=True, padding_value=0)
-    
-    image = [item['image'] for item in batch]
-    image = torch.stack(image)
-
-    target = [item['target'] for item in batch]
-    target = torch.stack(target)
-
     return {
-        "image": image,
-        "text": text_tokens,
-        "target": target
-        }
+        "text": pad_sequence([item['text'] for item in batch], batch_first=True, padding_value=0),
+        "image": torch.stack([item['image'] for item in batch]),
+        "target": torch.stack([item['target'] for item in batch])
+    }
 
 def get_splitted_dataloaders(mimic_cxr_path, device, batch_size):
     train_dataset = DicomDataset(mimic_cxr_path, mode="train", device=device)
     valid_dataset = DicomDataset(mimic_cxr_path, mode="valid", device=device)
     test_dataset = DicomDataset(mimic_cxr_path, mode="test", device=device)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)
+    #num_workers' rule of thumb: num_worker = 4 * num_GPU
+    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)#, num_workers=8)
+    # valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)#, num_workers=8)
+    
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=8)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=8)
+
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)
     return train_dataloader, valid_dataloader, test_dataloader

@@ -36,15 +36,54 @@ class InViT(ViTForMaskedImageModeling):
                 nn.PixelShuffle(config.encoder_stride),
             )
         else:
+            # self.decoder = nn.Sequential(
+            #     nn.ConvTranspose2d(config.hidden_size, 128, (5, 5)),
+            #     nn.BatchNorm2d(128),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(128, 64, (4, 4), stride=3),
+            #     nn.BatchNorm2d(64),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(64, 1, (2, 2), stride=2),
+            # )
+            ##1.50mn/100it
+
+            #Moins de layers, plus d'upsampling et de dim conservée? (pour le training time)
+            # self.decoder = nn.Sequential(
+            #     nn.ConvTranspose2d(config.hidden_size, 128, (8, 8)),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(128, 1, (4, 4), stride=4),
+            # )
+            ##1.11mn/100it
+
+            #Chatgpt conseil
+            # self.decoder = nn.Sequential(
+            #     nn.ConvTranspose2d(256, 128, (3, 3), stride=2),
+            #     nn.BatchNorm2d(128),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(128, 64, (3, 3), stride=2),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(64, 64, (3, 3), stride=2),
+            #     nn.ReLU(),
+            #     nn.ConvTranspose2d(64, 1, (3, 3), stride=1),
+            #     nn.Tanh(),
+            # )
+
+            #Pixelshuffle
+            # self.decoder = nn.Sequential(
+            #     nn.Conv2d(256, 2*2*256, kernel_size=1),
+            #     nn.PixelShuffle(2),
+            #     nn.ReLU(),
+            #     nn.Conv2d(256, 16*16*1, kernel_size=1),
+            #     nn.PixelShuffle(16),
+            # )
+            ##27s/100it
+
             self.decoder = nn.Sequential(
-                nn.ConvTranspose2d(256, 32, (4, 4), stride=4),
-                nn.BatchNorm2d(32),
-                nn.GELU(),
-                nn.ConvTranspose2d(32, 8, (4, 4), stride=4),
-                nn.BatchNorm2d(8),
-                nn.GELU(),
-                nn.ConvTranspose2d(8, 1, (2, 2), stride=2),
-                nn.Tanh(),
+                nn.Conv2d(256, 4*4*64, kernel_size=1),
+                nn.PixelShuffle(4),
+                nn.ReLU(),
+                nn.Conv2d(64, 8*8*1, kernel_size=(3, 3)),
+                nn.PixelShuffle(8),
             )
 
         self.do_global_reconstruction = do_global_reconstruction
@@ -89,6 +128,7 @@ class InViT(ViTForMaskedImageModeling):
                                         h=size, w=size
                                         )
         else:
+            # print("sequence_output.shape", sequence_output.shape) # 256 256 16 16
             reconstructed_pixel_values = self.decoder(sequence_output)
 
         masked_patch_loss = None

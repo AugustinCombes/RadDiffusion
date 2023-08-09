@@ -9,8 +9,11 @@ from PIL import Image
 import numpy as np
 import pydicom
 
-from transformers import AutoImageProcessor
+from transformers import AutoImageProcessor, ViTImageProcessor
 from transformers import BertTokenizer
+
+
+FROM_PRETRAINED = False # whether we use the AutoImageProcessor.from_pretrained configuration, or a custom one
 
 FILES_DIR = '../scrap/physionet.org/files/mimic-cxr/2.0.0/files'
 
@@ -54,8 +57,11 @@ def process_patient(patient):
                 image = (pydicom.dcmread(dicom_path).pixel_array / 16)
                 image = image.astype(np.uint8)
                 image = Image.fromarray(image)
-                image = crop_center(image).convert('RGB')
-
+                image = crop_center(image)
+                if FROM_PRETRAINED:
+                    image = image.convert('RGB')
+                
+                image = np.array(image)[:, :, None]
                 pixel_values = image_processor(images=image, return_tensors="pt").pixel_values
                 pixel_values = pixel_values[0, 0]
 
@@ -69,8 +75,13 @@ def process_patient(patient):
             continue
         with open(text_path, "r") as f:
             study_txt = f.read()
-        encoded_text = tokenizer(study_txt, return_tensors='pt')["input_ids"] #max length trunc pas mis :)
-        encoded_text = encoded_text.squeeze()
+        encoded_text = tokenizer(study_txt, 
+                                return_tensors='pt',
+                                truncation=True, 
+                                max_length=512,
+                                padding='max_length')
+        
+        encoded_text = encoded_text["input_ids"].squeeze()
         hdf5_file.create_dataset(dataset_name, data=encoded_text)
     
     length = len(hdf5_file)
@@ -81,17 +92,31 @@ def process_patient(patient):
 
 plist = list(map(lambda x: x.replace(FILES_DIR+"/", ''), glob.glob(os.path.join(FILES_DIR, "p*", "p*"))))
 
-image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+if FROM_PRETRAINED:
+    image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
+else:
+    image_processor = ViTImageProcessor(
+            do_resize=True,
+            size={
+                "height": 512,
+                "width": 512
+            },
+            do_rescale=True,
+            rescale_factor=0.00392156862745098, 
+            do_normalize=False,
+            # image_mean=[1.],
+            # image_std=[0.5],
+            resample=2
+        )
+
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-hdf5_top_path = "preprocessed_data/xcr"
+hdf5_top_path = "preprocessed_data/xcr_512"
 
 if not os.path.exists(hdf5_top_path):
     os.mkdir(hdf5_top_path)
     for idx in range(10):
         os.mkdir(os.path.join(hdf5_top_path, f"p1{idx}"))
 
-# process_patient(plist[1])
-
-with Pool(int(0.65*os.cpu_count())) as p:
+with Pool(int(0.85*os.cpu_count())) as p:
     list(tqdm(p.imap(process_patient, plist), total=len(plist)))
