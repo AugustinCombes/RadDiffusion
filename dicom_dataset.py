@@ -109,17 +109,14 @@ def collate_fn(batch):
         "target": torch.stack([item['target'] for item in batch])
     }
 
-def get_splitted_dataloaders(mimic_cxr_path, device, batch_size):
+def get_splitted_dataloaders(mimic_cxr_path, device, batch_size, num_workers=2):
     train_dataset = DicomDataset(mimic_cxr_path, mode="train", device=device)
     valid_dataset = DicomDataset(mimic_cxr_path, mode="valid", device=device)
     test_dataset = DicomDataset(mimic_cxr_path, mode="test", device=device)
 
     #num_workers' rule of thumb: num_worker = 4 * num_GPU
-    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)#, num_workers=8)
-    # valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)#, num_workers=8)
-    
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=8)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=8)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=num_workers)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn, num_workers=num_workers)
 
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, drop_last=False, collate_fn=collate_fn)
     return train_dataloader, valid_dataloader, test_dataloader
