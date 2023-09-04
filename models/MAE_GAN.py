@@ -40,6 +40,7 @@ class MAE_GAN(ViTMAEForPreTraining):
             num_hidden_layers = config.decoder_num_hidden_layers,
             num_attention_heads = config.decoder_num_attention_heads,
             intermediate_size = config.decoder_intermediate_size,
+            # hidden_dropout_prob=0.3,
         )
 
         self.cpu_device = torch.device("cpu")
@@ -47,9 +48,10 @@ class MAE_GAN(ViTMAEForPreTraining):
         self.discriminator = torch.nn.Sequential(
             torch.nn.Linear(self.config.hidden_size, self.disc_config.hidden_size),
             ViTMAEWrapper(ViTMAELayer(self.disc_config)),
+            # ViTMAEWrapper(ViTMAELayer(self.disc_config)),
             torch.nn.LayerNorm(self.disc_config.hidden_size, self.disc_config.layer_norm_eps),
             torch.nn.Linear(self.disc_config.hidden_size, 1),
-            torch.nn.Sigmoid()
+            # torch.nn.Sigmoid()
         )
         
     def merge_patches(self, true_patches, pred_patches, is_masked):
@@ -85,6 +87,39 @@ class MAE_GAN(ViTMAEForPreTraining):
 
         return (mixed_image.detach().cpu() + colored_patch_boxes).clip(-1, 1)
 
+    def sampler(self, sequence, len_keep=None, noise=None):
+        """
+        Perform per-sample random masking by per-sample shuffling. Per-sample shuffling is done by argsort random
+        noise. Allows the use of specific sampling sequence len_keep.
+
+        Args:
+            sequence (`torch.LongTensor` of shape `(batch_size, sequence_length, dim)`)
+            noise (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*) which is
+                mainly used for testing purposes to control randomness and maintain the reproducibility
+            len_keep 
+        """
+        batch_size, seq_length, dim = sequence.shape
+        if len_keep is None:
+            len_keep = int(seq_length * (1 - self.config.mask_ratio))
+        if noise is None:
+            noise = torch.rand(batch_size, seq_length, device=sequence.device)  # noise in [0, 1]
+
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        sequence_unmasked = torch.gather(sequence, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, dim))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([batch_size, seq_length], device=sequence.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        return sequence_unmasked, mask, ids_restore
+
     def forward_discriminator_loss(self, mixed_image, mask):
         '''
         Computes y_hat = D(\hat X).
@@ -102,6 +137,9 @@ class MAE_GAN(ViTMAEForPreTraining):
         
         These patches are forwarded in the ViT encoder. The resulting representations are forwarded in
             the ViT discriminator, resulting in the logits y_hat.
+
+        The goal of the discriminator is to retrieve mask, that is to predict high probabilities for
+            masked positions and low probabilities for unmasked ones.
         '''
 
         full_embedding_sequence = self.vit.embeddings.patch_embeddings(mixed_image)
@@ -110,16 +148,19 @@ class MAE_GAN(ViTMAEForPreTraining):
         batch_size, seq_length, _ = full_embedding_sequence.shape
         L_true = int(seq_length * (1 - self.config.mask_ratio))
         L_fake = int(seq_length * self.config.mask_ratio)
+        L_target = seq_length // 4
 
         sequence_true = full_embedding_sequence[~mask.bool()].reshape(
             (batch_size, L_true, self.config.hidden_size)
             )
-        sequence_unmasked_true, _, _ = self.vit.embeddings.random_masking(sequence_true)
+        # sequence_unmasked_true, _, _ = self.vit.embeddings.random_masking(sequence_true)
+        sequence_unmasked_true, _, _ = self.sampler(sequence_true, L_target // 2)
 
         sequence_fake = full_embedding_sequence[mask.bool()].reshape(
             (batch_size, L_fake, self.config.hidden_size)
             )
-        sequence_unmasked_fake, _, _ = self.vit.embeddings.random_masking(sequence_fake)
+        # sequence_unmasked_fake, _, _ = self.vit.embeddings.random_masking(sequence_fake)
+        sequence_unmasked_fake, _, _ = self.sampler(sequence_fake, L_target // 2)
 
         sequence_unmasked = torch.concat((sequence_unmasked_true, sequence_unmasked_fake), dim=1)
         masked_embeddings = self.vit.encoder(sequence_unmasked)['last_hidden_state']
@@ -129,7 +170,7 @@ class MAE_GAN(ViTMAEForPreTraining):
         y = torch.concat((torch.ones_like(sequence_unmasked_true[..., :1]), torch.zeros_like(sequence_unmasked_fake[..., :1])), dim=1)        
         return y, y_hat
 
-    def compute_gamma(model, l2_loss, adv_loss):
+    def compute_gamma(self, l2_loss, adv_loss):
         '''
         Computes \gamma = \frac{grad_last(l_2)}{grad_last(l_adv) + 1e-6}.
 
@@ -137,16 +178,60 @@ class MAE_GAN(ViTMAEForPreTraining):
             to the image space, w.r.t the loss taken as argument.
         '''
 
-        l2_loss.backward(retain_graph=True)
-        grad_l2 = model.decoder.decoder_pred.weight.grad
-        model.zero_grad()
+        last_layer = self.decoder.decoder_pred
+        last_layer_weight = last_layer.weight
 
-        adv_loss.backward(retain_graph=True)
-        grad_adv = model.decoder.decoder_pred.weight.grad
-        model.zero_grad()
+        l2_grads = torch.norm(
+            torch.autograd.grad(l2_loss, last_layer_weight, retain_graph=True)[0]
+            )
+        adv_grads = torch.norm(
+            torch.autograd.grad(adv_loss, last_layer_weight, retain_graph=True)[0]
+            )
+        
+        gamma = torch.norm(l2_grads) / (adv_grads + 1e-4)
+        gamma = torch.clamp(gamma, 0, 1e4).detach()
+        return gamma, l2_grads.detach(), adv_grads.detach() #gamma * 0.8
 
-        gamma = grad_l2.norm() / (grad_adv.norm() + 1e-6)
-        return gamma
+        # self.vit.zero_grad()
+        # l2_loss.backward(retain_graph=True)
+        # grads_l2 = [param.grad for param in self.vit.parameters()]
+        # l2_norm = sum([torch.norm(g) for g in grads_l2 if g is not None])
+
+        # self.vit.zero_grad()
+        # adv_loss.backward(retain_graph=True)
+        # grads_adv = [param.grad for param in self.vit.parameters()]
+        # adv_norm = sum([torch.norm(g) for g in grads_adv if g is not None])
+
+        # self.vit.zero_grad()
+        # gamma = l2_norm / (adv_norm + 1e-6)
+
+        # return gamma
+    
+        # self.vit.zero_grad()
+        # l2_loss.backward(retain_graph=True)
+        # grads_l2 = [param.grad for param in self.vit.parameters()]
+        # l2_norm = sum([torch.norm(g) for g in grads_l2 if g is not None])
+
+        # self.vit.zero_grad()
+        # adv_loss.backward(retain_graph=True)
+        # grads_adv = [param.grad for param in self.vit.parameters()]
+        # adv_norm = sum([torch.norm(g) for g in grads_adv if g is not None])
+
+        # self.vit.zero_grad()
+        # alpha = l2_norm / (l2_norm + adv_norm)
+
+        # return alpha
+
+        # l2_loss.backward(retain_graph=True)
+        # grad_l2 = model.decoder.decoder_pred.weight.grad
+        # model.zero_grad()
+
+        # adv_loss.backward(retain_graph=True)
+        # grad_adv = model.decoder.decoder_pred.weight.grad
+        # model.zero_grad()
+
+        # gamma = grad_l2.norm() / (grad_adv.norm() + 1e-6)
+        # return gamma
 
     def forward(
         self,
