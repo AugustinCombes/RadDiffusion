@@ -58,7 +58,6 @@ def main():
     train_dl, valid_dl, _ = get_splitted_dataloaders("preprocessed_data/xcr_256", device, batchSize, num_workers=args.num_workers)
 
     g_optimizer = torch.optim.Adam(chain(model.vit.parameters(), model.decoder.parameters()), lr=base_lr, weight_decay=weight_decay)
-    d_optimizer = torch.optim.Adam(chain(model.vit.parameters(), model.discriminator.parameters()), lr=base_lr/3, weight_decay=weight_decay)
     bce_log = torch.nn.BCEWithLogitsLoss()
 
     n_sample = 180776 #len(train_dl.dataset) #speed-up pour 256
@@ -76,22 +75,11 @@ def main():
     noise_ref = torch.rand(batchSize, seq_length, device=model.device)
 
     g_scheduler = get_cosine_schedule_with_warmup(g_optimizer, num_warmup_steps=warmup_steps, num_training_steps=training_steps, num_cycles=1.5)
-    d_scheduler = get_cosine_schedule_with_warmup(d_optimizer, num_warmup_steps=warmup_steps, num_training_steps=training_steps, num_cycles=1.5)
     step = 0
     for epoch in range(epochs):
         pbar.set_postfix(Epoch=epoch+1, refresh=True)
         epoch_stats = {
             "L_2": [],
-            "L_adv": [],
-            "gamma": [],
-            "numerateur_gamma_l2": [],
-            "denominateur_gamma_adv": [],
-            "gamma": [],
-            "L_gen": [],
-            "L_dis": [],
-            "masked_patches_preds": [],
-            "unmasked_patches_preds": [],
-            "fake_patch_preds": [],
         }
 
         for idx, batch in enumerate(train_dl):
@@ -102,50 +90,13 @@ def main():
             result = model(batch)
             
             l2_loss = result["loss"]
-            y, y_hat = model.forward_discriminator_loss(result["mixed_image"], result["mask"])
-            l = y.shape[1] // 2
-
-            y, y_hat = y[:, :l], y_hat[:, :l]
-            with torch.no_grad():
-                ismask_probs = torch.nn.Sigmoid()(y_hat)
-                fake_patch_preds = ismask_probs.mean() * 100
-
-            adv_loss = bce_log(y_hat, 1-y)
-
-            gamma, num, den = model.compute_gamma(l2_loss, adv_loss)
-            g_loss = l2_loss + gamma * adv_loss
-
-            g_loss.backward()
+            l2_loss.backward()
+            
             g_optimizer.step(), g_scheduler.step()
 
             if True:
                 epoch_stats["L_2"].append(l2_loss.detach().item())
-                epoch_stats["L_adv"].append(adv_loss.detach().item())
-                epoch_stats["gamma"].append(gamma.item() if type(gamma) is not float else gamma)
-                epoch_stats["numerateur_gamma_l2"].append(num.cpu().item())
-                epoch_stats["denominateur_gamma_adv"].append(den.cpu().item())
-                epoch_stats["L_gen"].append(g_loss.detach().item())
-                epoch_stats["fake_patch_preds"].append(fake_patch_preds.detach().item())
-
-            #Discriminator
-            for repeat in range(3):
-                d_optimizer.zero_grad()
-                y, y_hat = model.forward_discriminator_loss(result["mixed_image"].detach(), result["mask"].detach())
-
-                d_loss = bce_log(y_hat, y)
-                d_loss.backward()
-                d_optimizer.step()
-
-            d_scheduler.step()
-            with torch.no_grad():
-                ismask_probs = torch.nn.Sigmoid()(y_hat)
-                masked_patches_preds = ismask_probs[y.bool()].mean() * 100
-                unmasked_patches_preds = ismask_probs[~y.bool()].mean() * 100
-            
-            if True:
-                epoch_stats["L_dis"].append(d_loss.detach().item())
-                epoch_stats["masked_patches_preds"].append(masked_patches_preds.detach().item())
-                epoch_stats["unmasked_patches_preds"].append(unmasked_patches_preds.detach().item())
+                
             pbar.update(1)
         epoch_stats = {k: np.array(v).mean() for k,v in epoch_stats.items()}
 
@@ -153,15 +104,8 @@ def main():
             logging.info('')
             logging.info(f'Epoch {epoch}')
             
-            row_G = 'l_gen = l_mae + gamma * l_adv -> {:.2f} = {:.2f} + {:.5f} * {:.2f}'.format(
-                epoch_stats["L_gen"], epoch_stats["L_2"], epoch_stats["gamma"], epoch_stats["L_adv"])
-            row_2 = 'Mean prediction on generated patches {:.2f}'.format(epoch_stats["fake_patch_preds"])
-            row_3 = 'gamma = num/den: {:.5f} = {:.5f} / {:.5f}'.format(
-                epoch_stats["gamma"], epoch_stats["numerateur_gamma_l2"], epoch_stats["denominateur_gamma_adv"])
-            row_D = 'l_dis = {:.2f}'.format(epoch_stats["L_dis"])
-            row_4 = 'Mean prediction on masked patches {:.2f}%, on unmasked patches {:.2f}%'.format(
-                epoch_stats["masked_patches_preds"], epoch_stats["unmasked_patches_preds"])
-            logging.info("\n".join([row_G, row_2, row_3, row_D, row_4]))
+            row_l2 = 'l_mae -> {:.2f}'.format(epoch_stats["L_2"])
+            logging.info(row_l2)
         
             with torch.no_grad():
                 res = model(batch_ref, noise=noise_ref)
