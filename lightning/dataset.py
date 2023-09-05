@@ -37,7 +37,7 @@ class CXRDataModule(pl.LightningDataModule):
     def _get_base_datapipe(self, split):
         split_dirs = self._get_split_dirs(split)
         files = FileLister(split_dirs, masks="*.h5", abspath=True)
-        # files = Shuffler(files)
+        files = Shuffler(files)
         return CXRImageLoader(files)
 
     def _get_split_dirs(self, split):
