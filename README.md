@@ -1,5 +1,9 @@
 # DeconViT: high-resolution image representation learning
 
+Template:
+```python
+python train_with_gan.py --run_name "vits" --num_workers 4 --model s --device "cuda:3"
+```
 
 ## concurrent training of patch-level...
 
