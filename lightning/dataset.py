@@ -53,6 +53,7 @@ class CXRDataModule(pl.LightningDataModule):
             self.train_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
             shuffle=True,
         )
 
@@ -61,6 +62,7 @@ class CXRDataModule(pl.LightningDataModule):
             self.val_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
             shuffle=False,
         )
 
@@ -69,6 +71,7 @@ class CXRDataModule(pl.LightningDataModule):
             self.test_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            drop_last=True,
             shuffle=False,
         )
 
@@ -78,7 +81,7 @@ class CXRImageLoader(IterDataPipe):
         super().__init__()
         self.dp_files = dp_files
         self.load_text = load_text
-        
+
     def __iter__(self):
         for h5_path in self.dp_files:
             # Find studies in h5 file
@@ -90,17 +93,18 @@ class CXRImageLoader(IterDataPipe):
                 img_ids = list(
                     filter(lambda x: study_id in x and "txt" not in x, h5_keys)
                 )
-                img = h5_file[img_ids[0]]  # first image only, for now
-                
-                # Yield data (adding associated text if required)
-                if not self.load_text:
-                    yield self._process_img_data(img)
-                else:
-                    txt = h5_file[study_id + "_txt"]
-                    yield {
-                        "img": self._process_img_data(img),
-                        "txt": self._process_txt_data(txt),
-                    }
+                for img_id in img_ids:
+                    img = h5_file[img_id]
+                    
+                    # Yield image
+                    if not self.load_text:
+                        yield self._process_img_data(img)
+                    else:
+                        txt = h5_file[study_id + "_txt"]
+                        yield {
+                            "img": self._process_img_data(img),
+                            "txt": self._process_txt_data(txt),
+                        }
 
     @staticmethod
     def _process_img_data(h5_data):

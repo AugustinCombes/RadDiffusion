@@ -161,5 +161,6 @@ cython_debug/
 
 # Custom
 lightning/logs/*
+lightning/taming/*
 lightning/vgg_lpips/*
 lightning/count_h5_files.py

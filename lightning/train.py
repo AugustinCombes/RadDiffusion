@@ -28,8 +28,9 @@ def main():
         devices=config.DEVICES,
         min_epochs=1,
         max_epochs=config.NUM_EPOCHS,
+        limit_train_batches=config.MAX_STEPS_PER_TRAIN_EPOCH,
         precision=config.PRECISION,
-        log_every_n_steps=10,
+        log_every_n_steps=50,
         callbacks=callbacks,
     )
     trainer.fit(model, data_module)
@@ -48,7 +49,7 @@ def select_model():
         model = VQ_GAN_PL(
             lr=config.LEARNING_RATE,
             betas=config.OPTIM_BETAS,
-            vq_config=config.VQ_CONFIG,
+            **config.VQ_GAN_CONFIG,
         )
     else:
         raise ValueError("Invalid model type selected.")
