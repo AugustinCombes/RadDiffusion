@@ -48,10 +48,8 @@ class MAE_GAN(ViTMAEForPreTraining):
         self.discriminator = torch.nn.Sequential(
             torch.nn.Linear(self.config.hidden_size, self.disc_config.hidden_size),
             ViTMAEWrapper(ViTMAELayer(self.disc_config)),
-            # ViTMAEWrapper(ViTMAELayer(self.disc_config)),
             torch.nn.LayerNorm(self.disc_config.hidden_size, self.disc_config.layer_norm_eps),
             torch.nn.Linear(self.disc_config.hidden_size, 1),
-            # torch.nn.Sigmoid()
         )
         
     def merge_patches(self, true_patches, pred_patches, is_masked):
@@ -192,47 +190,6 @@ class MAE_GAN(ViTMAEForPreTraining):
         gamma = torch.clamp(gamma, 0, 1e4).detach()
         return gamma, l2_grads.detach(), adv_grads.detach() #gamma * 0.8
 
-        # self.vit.zero_grad()
-        # l2_loss.backward(retain_graph=True)
-        # grads_l2 = [param.grad for param in self.vit.parameters()]
-        # l2_norm = sum([torch.norm(g) for g in grads_l2 if g is not None])
-
-        # self.vit.zero_grad()
-        # adv_loss.backward(retain_graph=True)
-        # grads_adv = [param.grad for param in self.vit.parameters()]
-        # adv_norm = sum([torch.norm(g) for g in grads_adv if g is not None])
-
-        # self.vit.zero_grad()
-        # gamma = l2_norm / (adv_norm + 1e-6)
-
-        # return gamma
-    
-        # self.vit.zero_grad()
-        # l2_loss.backward(retain_graph=True)
-        # grads_l2 = [param.grad for param in self.vit.parameters()]
-        # l2_norm = sum([torch.norm(g) for g in grads_l2 if g is not None])
-
-        # self.vit.zero_grad()
-        # adv_loss.backward(retain_graph=True)
-        # grads_adv = [param.grad for param in self.vit.parameters()]
-        # adv_norm = sum([torch.norm(g) for g in grads_adv if g is not None])
-
-        # self.vit.zero_grad()
-        # alpha = l2_norm / (l2_norm + adv_norm)
-
-        # return alpha
-
-        # l2_loss.backward(retain_graph=True)
-        # grad_l2 = model.decoder.decoder_pred.weight.grad
-        # model.zero_grad()
-
-        # adv_loss.backward(retain_graph=True)
-        # grad_adv = model.decoder.decoder_pred.weight.grad
-        # model.zero_grad()
-
-        # gamma = grad_l2.norm() / (grad_adv.norm() + 1e-6)
-        # return gamma
-
     def forward(
         self,
         batch,
@@ -275,6 +232,5 @@ class MAE_GAN(ViTMAEForPreTraining):
             "mask": mask,
             "ids_restore": ids_restore,
             "hidden_states": outputs.hidden_states,
-            "example_mixed_image": mixed_image[0],
             "mixed_image": mixed_image,
         }
