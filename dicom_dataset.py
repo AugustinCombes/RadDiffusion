@@ -49,16 +49,18 @@ class DicomDataset(IterableDataset):
     
     def __len__(self):
         length = 0
-        self.h5_iterator = iter(self.h5_files) #possible de shuffler ici, pas fait pour l'instant pcq je suis un thug
+        self.h5_iterator = iter(self.h5_files)
         
         for hdf5_path in self.h5_iterator:
             try:
                 hdf5_file = h5py.File(hdf5_path, "r")
             except OSError as e:
                 continue
-
             keys = list(hdf5_file.keys())
-            length += len(set(map(lambda x: x.split("_")[0], keys)))
+            unique_studies = list(set(map(lambda x: x.split("_")[0], keys)))
+            for study_id in unique_studies:
+                image_ids = filter(lambda x: study_id in x and "txt" not in x, keys)
+                length += len(list(image_ids))
         
         return length
 
@@ -72,6 +74,7 @@ class DicomDataset(IterableDataset):
             worker_total_num = worker_info.num_workers
 
         self.h5_iterator = iter(self.h5_files[worker_id::worker_total_num])  # Split the files among the workers
+        ##possible de shuffler ici-haut
 
         for hdf5_path in self.h5_iterator:
             try:
@@ -85,22 +88,20 @@ class DicomDataset(IterableDataset):
                 text_id = "_".join([study_id, "txt"])
                 text = torch.tensor(hdf5_file[text_id][...], device=self.device)
 
-                image_ids = filter(lambda x: study_id in x and "txt" not in x, keys)
-                for image_id in image_ids:
-                    image = torch.tensor(hdf5_file[image_id][...], device=self.device)
-                    break #first image only for now
-
                 # multi expert label
                 target = self.study2labels.get(int(study_id[1:]), False)
                 if not target:
                     continue
 
-                sample = {
-                    "image": image,
-                    "text": text,
-                    "target": torch.tensor(target, device=self.device),
-                }
-                yield sample
+                image_ids = filter(lambda x: study_id in x and "txt" not in x, keys)
+                for image_id in image_ids:
+                    image = torch.tensor(hdf5_file[image_id][...], device=self.device)
+                    sample = {
+                        "image": image,
+                        "text": text,
+                        "target": torch.tensor(target, device=self.device),
+                    }
+                    yield sample
 
 def collate_fn(batch):
     return {

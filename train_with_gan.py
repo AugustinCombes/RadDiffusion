@@ -29,18 +29,18 @@ parser.add_argument('--device', type=str, default="cuda:2", help='Gpu to use.')
 parser.add_argument('--model', type=str, default="xs", help='Size of the ViT backbone.')
 args = parser.parse_args()
 
-run_name = os.path.join("runs", args.run_name)
-
-while os.path.exists(run_name) and run_name is not None:
-    run_name += "_"
+if args.run_name is not None:
+    run_name = os.path.join("runs", args.run_name)
+    while os.path.exists(run_name) and run_name is not None:
+        run_name += "_"
 
 def main():
     device = args.device
     
-    print(f'Run Name: {run_name or "none"}')
+    print(f'Run Name: {args.run_name or "no log for this run"}')
     print(f"Number of Workers: {args.num_workers}")
     
-    if run_name is not None:
+    if args.run_name is not None:
         os.mkdir(run_name), [os.mkdir(os.path.join(run_name, f"vis_{idx}")) for idx in range(5)]
         logging.basicConfig(filename=f'{run_name}/logs.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     config = configs[args.model]
@@ -50,7 +50,7 @@ def main():
     model.train()
 
     batchSize = 1024
-    epochs = 300 #30 #60 #501
+    epochs = 500
     warmup_epochs = 50
     base_lr = 1e-4 #5e-4
     weight_decay = 1e-5 #5e-2
@@ -61,7 +61,7 @@ def main():
     d_optimizer = torch.optim.Adam(chain(model.vit.parameters(), model.discriminator.parameters()), lr=base_lr/3, weight_decay=weight_decay)
     bce_log = torch.nn.BCEWithLogitsLoss()
 
-    n_sample = 180776 #len(train_dl.dataset) #speed-up pour 256
+    n_sample = 299294 #len(train_dl.dataset) #speed-up pour 256
 
     n_steps_per_epoch = math.ceil(n_sample/batchSize)
     warmup_steps = n_steps_per_epoch * warmup_epochs
@@ -75,10 +75,36 @@ def main():
     seq_length = (model.config.image_size ** 2) // (model.config.patch_size ** 2)
     noise_ref = torch.rand(batchSize, seq_length, device=model.device)
 
+    if args.run_name is not None:
+        # Save the reference images
+
+        with torch.no_grad():
+            for ex in range(5):
+                model.save_img(
+                    batch_ref["image"][ex], 
+                    f"{run_name}/vis_{ex}/original.jpg"
+                )
+
+        if config.norm_pix_loss:
+            # Save the normalized reference images
+
+            image_ref = batch_ref['image'][:, None, :, :]
+            image_patchified = model.patchify(image_ref)
+            mean, var = image_patchified.mean(dim=-1, keepdim=True), image_patchified.var(dim=-1, keepdim=True)
+            image_patchified = (image_patchified - mean) / (var + 1.0e-6) ** 0.5
+            batch_ref["image"] = model.unpatchify(image_patchified).squeeze()
+
+            with torch.no_grad():
+                for ex in range(5):
+                    model.save_img(
+                        batch_ref["image"][ex, None], 
+                        f"{run_name}/vis_{ex}/original_normalized.jpg"
+                    )
+
     g_scheduler = get_cosine_schedule_with_warmup(g_optimizer, num_warmup_steps=warmup_steps, num_training_steps=training_steps, num_cycles=1.5)
     d_scheduler = get_cosine_schedule_with_warmup(d_optimizer, num_warmup_steps=warmup_steps, num_training_steps=training_steps, num_cycles=1.5)
     step = 0
-    for epoch in range(epochs):
+    for epoch in range(epochs+1):
         pbar.set_postfix(Epoch=epoch+1, refresh=True)
         epoch_stats = {
             "L_2": [],
@@ -147,9 +173,10 @@ def main():
                 epoch_stats["masked_patches_preds"].append(masked_patches_preds.detach().item())
                 epoch_stats["unmasked_patches_preds"].append(unmasked_patches_preds.detach().item())
             pbar.update(1)
+
         epoch_stats = {k: np.array(v).mean() for k,v in epoch_stats.items()}
 
-        if run_name is not None:
+        if args.run_name is not None:
             logging.info('')
             logging.info(f'Epoch {epoch}')
             
@@ -166,13 +193,14 @@ def main():
             with torch.no_grad():
                 res = model(batch_ref, noise=noise_ref)
                 for ex in range(5):
+                    model.get_nth_boxed_visualisation(res, ex)
                     model.save_img(
                         model.get_nth_boxed_visualisation(res, ex), 
                         f"{run_name}/vis_{ex}/epoch_{epoch}.jpg"
                     )
 
-    if not run_name is not None:
-        torch.save(model.state_dict(), str(datetime.datetime.now()) + ".pth")
+            if epoch%100 == 0 and epoch > 0:
+                torch.save(model.state_dict(), f"{run_name}/model_{epoch}.pth")
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
