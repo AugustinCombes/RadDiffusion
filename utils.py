@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import numpy as np
 
+from PIL import Image
+
 def plot_original(pixel_values, mask, config):
     patch_width = config.image_size // config.patch_size
     pixel_values = pixel_values.squeeze().cpu()
@@ -74,3 +76,32 @@ def plot_global_comparison(input_image, reconstructed_image, save_to=None):
         plt.savefig(save_to)
     else:
         plt.show()
+
+def save_pt_img(pixels, to):
+    pixels = pixels.squeeze().detach()
+    pixels = pixels.cpu()
+    pixels = (pixels + 1.) / 2.
+
+    cm = plt.get_cmap('hot')
+    pixels = cm(pixels)
+
+    pixels = (pixels[:, :, :3] * 255.).astype(np.uint8)
+    Image.fromarray(pixels).resize((1024, 1024)).save(to)
+
+def get_nth_boxed_visualisation(image_size, patch_size, res, idx):
+    square_num_patch = image_size // patch_size
+
+    patch_box = torch.zeros((patch_size, patch_size))
+    patch_box[:, -1] = patch_box[:, 0] = patch_box[0, :] = patch_box[-1, :] = 1
+    patch_boxes = patch_box.repeat(square_num_patch, square_num_patch)
+
+    mixed_image = res["mixed_image"][idx].squeeze()
+    mask = res["mask"][idx].reshape(square_num_patch, square_num_patch)
+
+    upscaled_mask = mask.repeat_interleave(patch_size, 0).repeat_interleave(patch_size, 1)
+    colored_patch_boxes = (1 - upscaled_mask.cpu()) * patch_boxes
+
+    return (mixed_image.detach().cpu() + colored_patch_boxes).clip(-1, 1)
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
