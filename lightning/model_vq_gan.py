@@ -86,7 +86,7 @@ class VQ_GAN_PL(pl.LightningModule):
         
         # Manual backpropagation
         running_optim.zero_grad()
-        loss.backward(retain_graph=(optimizer_idx == 0))  # or nothing?
+        self.manual_backward(loss)  #, retain_graph=(optimizer_idx == 0))  # or?
         running_optim.step()
         
         # Log correct losses

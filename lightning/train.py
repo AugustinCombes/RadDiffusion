@@ -3,6 +3,7 @@ import torch
 import pytorch_lightning as pl
 from model_vq_gan import VQ_GAN_PL
 from model_mae_gan import MAE_GAN_PL
+from model_diffusion import DiffusionNetPL
 from dataset import CXRDataModule
 from callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -19,10 +20,9 @@ def main():
     )
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
-        # EarlyStopping(monitor="loss_pix", mode="min"),
     ]
     trainer = pl.Trainer(
-        # strategy=DDPStrategy(),
+        strategy="auto",  # DDPStrategy() if len(config.DEVICES) > 1 else None
         logger=TensorBoardLogger("logs", name=config.MODEL_TYPE),
         accelerator=config.ACCELERATOR,
         devices=config.DEVICES,
@@ -50,6 +50,14 @@ def select_model():
             lr=config.LEARNING_RATE,
             betas=config.OPTIM_BETAS,
             **config.VQ_GAN_CONFIG,
+        )
+    elif config.MODEL_TYPE == "DIFF":
+        model = DiffusionNetPL(
+            lr=config.LEARNING_RATE,
+            betas=config.OPTIM_BETAS,
+            img_size=config.IMG_SHAPE[0],
+            img_channels=config.IMG_CHANNELS,
+            **config.DIFF_CONFIG,
         )
     else:
         raise ValueError("Invalid model type selected.")

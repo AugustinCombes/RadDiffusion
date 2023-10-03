@@ -63,7 +63,7 @@ class MAE_GAN_PL(pl.LightningModule):
             last_layer_weight,
             retain_graph=True,
         )[0]
-        gamma = torch.norm(l2_loss_grads) / (torch.norm(adv_loss_grads) + 1e-4)
+        gamma = torch.norm(l2_loss_grads) / (torch.norm(adv_loss_grads) + 1e-6)
         gamma = torch.clamp(gamma, 0, 1e4).detach()
         return gamma
 
@@ -123,56 +123,47 @@ class MAE_GAN_PL(pl.LightningModule):
         """
         Define what happens during one batch when training the model.
         """
-        # Load optimizers, run model and generate reconstruction ("fake")
-        optim_gen, optim_disc = self.optimizers()
+        # Load correct optimizer and scheduler
+        optimizer_idx = batch_idx % len(self.optimizers())
+        running_optim = self.optimizers()[optimizer_idx]
+        running_sched = self.lr_schedulers()[optimizer_idx]
+        
+        # Run model, generate reconstruction ("fake"), and discriminate        
         mae_output = self._reconstruct(batch)
         mixed_images = mae_output["mixed_images"]
         mask = mae_output["mask"]
-
-        # Compute generator loss (wants fakes to be classfied as 1 by disc)
-        disc_output_gen = self._discriminate(mixed_images)
-        disc_fake_gen = disc_output_gen[mask == 1]
-        loss_adv = self.criterion(disc_fake_gen, torch.ones_like(disc_fake_gen))
-        loss_pix = mae_output["loss_pix"]
-        gamma = self._compute_gamma(loss_pix, loss_adv)
-        loss_gen = loss_pix + gamma * loss_adv
-
-        # Backpropagate generator loss
-        optim_gen.zero_grad()
-        self.manual_backward(loss_gen, retain_graph=True)
-        optim_gen.step()
-
-        # Compute discriminator loss (wants reals -> 1; fakes -> 0)
         disc_output = self._discriminate(mixed_images)
-        disc_real = disc_output[mask == 0]
-        disc_fake = disc_output[mask == 1]
-        loss_disc_real = self.criterion(disc_real, torch.ones_like(disc_real))
-        loss_disc_fake = self.criterion(disc_fake, torch.zeros_like(disc_fake))
-        loss_disc = loss_disc_real + loss_disc_fake  # weight with mask_ratio?
-
-        # Backpropagate discriminator loss
-        optim_disc.zero_grad()
-        self.manual_backward(loss_disc)
-        optim_disc.step()
-
-        # Call scheduler steps (because we are in manual_optimization mode)
-        sched_gen, sched_disc = self.lr_schedulers()
-        sched_gen.step()
-        sched_disc.step()
-
-        # Log loss info
-        self.log_dict(
-            {
+        
+        # Compute generator loss (wants fakes to be classfied as 1 by disc)
+        if optimizer_idx == 0:
+            disc_fake = disc_output[mask == 1]
+            loss_adv = self.criterion(disc_fake, torch.ones_like(disc_fake))
+            loss_pix = mae_output["loss_pix"]
+            gamma = self._compute_gamma(loss_pix, loss_adv)
+            loss = loss_pix + gamma * loss_adv
+            self.log_dict({
                 "loss_pix": loss_pix,
                 "loss_adv": loss_adv,
                 "gamma": gamma,
-                "loss_gen": loss_gen,
-                "loss_disc": loss_disc,
-            },
-            prog_bar=False,
-        )
+                "loss_gen": loss,
+            }, prog_bar=False)
+        
+        # Compute discriminator loss (wants reals -> 1; fakes -> 0)
+        if optimizer_idx == 1:
+            disc_real = disc_output[mask == 0]
+            disc_fake = disc_output[mask == 1]
+            loss_disc_real = self.criterion(disc_real, torch.ones_like(disc_real))
+            loss_disc_fake = self.criterion(disc_fake, torch.zeros_like(disc_fake))
+            loss = loss_disc_real + loss_disc_fake  # weight with mask_ratio?
+            self.log_dict({"loss_disc": loss})
 
-        # Monitor model quality
+        # Backpropagate generator loss
+        running_optim.zero_grad()
+        self.manual_backward(loss)  #, retain_graph=(optimizer_idx == 0)) or?
+        running_optim.step()
+        running_sched.step()  # needed when manual_optimization == True
+
+        # Monitor model reconstruction quality
         step = self.global_step // len(self.optimizers())  # both increment global step
         if step % 100 == 0:
             self._log_generated_images(batch, mae_output["mixed_images"], step)
