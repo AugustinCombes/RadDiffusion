@@ -22,22 +22,8 @@ with open(b_config_path, "r") as file:
 b_config = transformers.ViTMAEConfig.from_dict(b_config_dict)
 
 
-l_config_path = os.path.join(current_dir, 'vit_L.json')
-with open(l_config_path, "r") as file:
-    l_config_dict = json.load(file)
-l_config = transformers.ViTMAEConfig.from_dict(l_config_dict)
-
-
-original_config_path = os.path.join(current_dir, 'vit_original.json')
-with open(original_config_path, "r") as file:
-    original_config_dict = json.load(file)
-original_config = transformers.ViTMAEConfig.from_dict(original_config_dict)
-
-
 configs = {
     "xs": xs_config,
     "s": s_config,
     "b": b_config,
-    "l": l_config,
-    "original": original_config,
 }

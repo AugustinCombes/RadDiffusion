@@ -9,11 +9,10 @@ from PIL import Image
 import numpy as np
 import pydicom
 
-from transformers import AutoImageProcessor, ViTImageProcessor
+from transformers import ViTImageProcessor
 from transformers import BertTokenizer
 
 
-FROM_PRETRAINED = False # whether we use the AutoImageProcessor.from_pretrained configuration, or a custom one
 
 FILES_DIR = '../scrap/physionet.org/files/mimic-cxr/2.0.0/files'
 
@@ -92,22 +91,19 @@ def process_patient(patient):
 
 plist = list(map(lambda x: x.replace(FILES_DIR+"/", ''), glob.glob(os.path.join(FILES_DIR, "p*", "p*"))))
 
-if FROM_PRETRAINED:
-    image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224-in21k")
-else:
-    image_processor = ViTImageProcessor(
-            do_resize=True,
-            size={
-                "height": 512,
-                "width": 512
-            },
-            do_rescale=True,
-            rescale_factor=0.00392156862745098, 
-            do_normalize=False,
-            # image_mean=[1.],
-            # image_std=[0.5],
-            resample=2
-        )
+image_processor = ViTImageProcessor(
+        do_resize=True,
+        size={
+            "height": 256,
+            "width": 256
+        },
+        do_rescale=True,
+        rescale_factor=0.00392156862745098, 
+        do_normalize=False,
+        # image_mean=[1.],
+        # image_std=[0.5],
+        resample=2
+    )
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
