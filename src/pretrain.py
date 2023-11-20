@@ -282,12 +282,12 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
         self.model = DiffMAEBottleneckForPreTraining(self.config)
 
         self.num_diffusion_steps = 100
-        self.num_sparse_diffusion_steps = 5
+        self.num_sparse_diffusion_steps = 1
         self.probe_every = 5
 
         self.beta_min = torch.tensor(1e-4)
         self.beta_max = torch.tensor(2e-1)
-        rho = torch.tensor(1., device=self.device) # Hyperparameter to tune the schedule of noise
+        rho = torch.tensor(2., device=self.device) # Hyperparameter to tune the schedule of noise
         beta_schedule = torch.linspace(self.beta_min, self.beta_max, self.num_diffusion_steps, device=self.device) ** rho
         alpha_schedule = 1 - beta_schedule
         self.alpha_hat_schedule = torch.cumprod(alpha_schedule, dim=0)
@@ -365,7 +365,6 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
 
         #when the time schedule is not specified, fallback to the full diffusion time schedule
         if t_seq is None:
-            # t_seq = torch.arange(0, self.num_diffusion_steps, device=self.device).tile([hidden_states.shape[0], 1])
             t_seq = torch.arange(self.num_diffusion_steps - 1, -1, step=-1, device=self.device).tile([hidden_states.shape[0], 1])
 
         loss = []

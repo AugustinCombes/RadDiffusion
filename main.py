@@ -15,8 +15,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--ref_name', type=str, default='untitled', help='Name of the run.')
 parser.add_argument('--scheme', type=str, default="vanilla", help='Scheme used to pretrain the model.')
 parser.add_argument('--num_workers', type=int, default=8, help='Number of workers.')
-parser.add_argument('--device', type=list, default=[0], help='Gpu devices to use.')
-parser.add_argument('--encoder_size', type=str, default="s", help='Size of the ViT backbone.')
+parser.add_argument('--device', type=list, default=[0, 1, 2, 3], help='Gpu devices to use.')
+parser.add_argument('--encoder_size', type=str, default="xs", help='Size of the ViT backbone.')
 args = parser.parse_args()
 
 class PretrainCFG:
@@ -24,7 +24,7 @@ class PretrainCFG:
     pretraining_scheme = args.scheme
     config = args.encoder_size
     batchSize = 512
-    epochs = 300
+    epochs = 200
     base_lr = 1.4e-4
     weight_decay = 0.05
     
@@ -58,7 +58,7 @@ def main():
 
 
     #*# FINE-TUNING #*#
-    # supervised(FinetuneCFG, args, dataloaders)
+    supervised(FinetuneCFG, args, dataloaders)
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
