@@ -35,24 +35,23 @@ Qualitatively, we can observe the reconstructions with a masking ratio of 0.5 fo
 We systematically evaluate the quality of the learned representation for both pretraining schemes via linear probing and supervised fine-tuning, using multi-label binary classification for the 14 classes defined by the CheXpert article [4].
 
 #### Linear probing
-<table>
-  <tr>
-    <td>
-      <p>
-        We evaluate the predictive capacity of the bottleneck-cls pooled study representations during pretraining, using an 'xs' ViT encoder. 
-      </p>
-      <p>
-        We observe extracting study features from the model pretrained using the diffusion-MAE scheme induce greater predictive performances. 
-      </p>
-      <p>
-        Overall, it can be argued the vanilla-MAE scheme tends to converges faster to lower performances as it gets stucked in trivial image reconstructions, while the diffusion-MAE scheme steadily improve the patch reconstructions' quality, allowing for final study representations to capture finer-grained details, and eventually reaching higher predictive performances.
-      </p>
-    </td>
-    <td>
-      <img src="https://github.com/AugustinCombes/RadDiffusion/blob/main/images/linear_probings.png" alt="Linear probing vs. pretraining epochs)" alt="Your Image Description" width="5500"/>
-    </td>
-  </tr>
-</table>
+
+We evaluate the predictive capacity of the bottleneck-cls pooled study representations during pretraining, using an 'xs' ViT encoder. 
+
+<p align="center">
+  <img src="https://github.com/AugustinCombes/RadDiffusion/blob/main/images/linear_probings.png" alt="Linear probing vs. pretraining epochs)" width="728" height="306"/>
+  <br align="center"> 
+    <u style="font-size: larger;">
+      Linear probing performance of extracted study representations on the two pretraining schemes
+    </u>
+  </br>
+</p>
+
+
+Extracting study features from the model pretrained using the diffusion-MAE scheme induces greater predictive performances, suggesting it is learning more meaningful features than the vanilla-MAE baseline. 
+
+Overall, it can be argued the vanilla-MAE scheme tends to converges faster to lower performances as it gets stucked in trivial image reconstructions, while the diffusion-MAE scheme steadily improve the patch reconstructions' quality, allowing for final study representations to capture finer-grained details, and eventually reaching higher predictive performances.
+
 
 #### Fine-tuning
 
