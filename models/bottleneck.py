@@ -9,7 +9,8 @@ from typing import Optional, Set, Tuple, Union
 
 from transformers.models.vit_mae.modeling_vit_mae import get_2d_sincos_pos_embed
 from transformers.models.vit_mae.modeling_vit_mae import ViTMAEEmbeddings, ViTMAEPatchEmbeddings, ViTMAEAttention, ViTMAEIntermediate, ViTMAEPreTrainedModel
-from transformers.models.vit_mae.modeling_vit_mae import ViTMAEModelOutput, ViTMAEDecoderOutput, ViTMAEOutput, ViTMAEForPreTrainingOutput
+from transformers.models.vit_mae.modeling_vit_mae import ViTMAEModelOutput, ViTMAESelfOutput, ViTMAEDecoderOutput, ViTMAEOutput, ViTMAEForPreTrainingOutput, ViTMAESelfAttention
+from transformers.models.vit_mae.configuration_vit_mae import ViTMAEConfig
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.utils import ModelOutput
 from transformers import ViTPreTrainedModel
@@ -45,7 +46,6 @@ class ViTMAEBottleneckModelOutput(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 class ViTMAEBottleneckLayer(nn.Module):
-
     def __init__(self, config) -> None:
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
@@ -543,6 +543,7 @@ class ViTBottleneckForImageClassification(ViTPreTrainedModel):
         super().__init__(config)
 
         self.num_labels = config.num_labels
+        self.class_means = None
         self.vit = ViTMAEBottleneckModel(config)
 
         if from_checkpoint is not None:
@@ -603,8 +604,8 @@ class ViTBottleneckForImageClassification(ViTPreTrainedModel):
             if self.class_means is None:
                 loss_fct = nn.BCEWithLogitsLoss() 
             else:
-                # loss_fct = nn.BCEWithLogitsLoss(pos_weight=1/self.class_means.sqrt())
-                loss_fct = nn.BCEWithLogitsLoss()
+                loss_fct = nn.BCEWithLogitsLoss(pos_weight=1/self.class_means.sqrt().to(logits.device))
+                # loss_fct = nn.BCEWithLogitsLoss()
                 # loss_fct = nn.BCEWithLogitsLoss(pos_weight=1/self.class_means.to(logits.device))
                 # loss_fct = FocalWithLogitsLoss(pos_weight=1/self.class_means.to(logits.device))
 
@@ -622,7 +623,7 @@ class ViTBottleneckForImageClassification(ViTPreTrainedModel):
         )
     
 class DiffMAEBottleneckDecoder(nn.Module):
-    def __init__(self, config, num_patches, conv=False):
+    def __init__(self, config, num_patches, strategy=None):
         super().__init__()
 
         self.decoder_embed = nn.Linear(config.hidden_size, config.decoder_hidden_size, bias=True)
@@ -640,29 +641,21 @@ class DiffMAEBottleneckDecoder(nn.Module):
 
         self.decoder_patch_embeddings = ViTMAEPatchEmbeddings(decoder_config)
 
-        self.decoder_layers = nn.ModuleList(
-            [ViTMAEBottleneckLayer(decoder_config) for _ in range(config.decoder_num_hidden_layers)]
-        )
+        self.strategy = strategy
+        if strategy is None:
+            self.decoder_layers = nn.ModuleList(
+                [ViTMAEBottleneckLayer(decoder_config) for _ in range(config.decoder_num_hidden_layers)]
+            )
+        else:
+            self.decoder_layers = nn.ModuleList(
+                [ViTMAEBottleneckCrossLayer(decoder_config, strategy) for _ in range(config.decoder_num_hidden_layers // 2)] #n^2 -> n^2 / 2
+            )
 
         self.decoder_norm = nn.LayerNorm(config.decoder_hidden_size, eps=config.layer_norm_eps)
         
-        self.conv = conv
-        if not self.conv:
-            self.decoder_pred = nn.Linear(
-                config.decoder_hidden_size, config.patch_size**2 * config.num_channels, bias=True
-            )
-        else:
-            # self.decoder_linear = nn.Linear(config.decoder_hidden_size, config.patch_size**2 * config.num_channels, bias=True)
-            # self.decoder_conv = nn.Sequential(*[DepthwiseSeparableResidualBlock(config) for _ in range(2)])
-            # self.pixel_shuffle = nn.PixelShuffle(config.patch_size)
-            self.decoder_conv = nn.Conv2d(
-                config.decoder_hidden_size, 
-                config.patch_size**2 * config.num_channels, 
-                kernel_size=3,
-                bias=True
-                )
-            self.pixel_shuffle = nn.PixelShuffle(config.patch_size)
-
+        self.decoder_pred = nn.Linear(
+            config.decoder_hidden_size, config.patch_size**2 * config.num_channels, bias=True
+        )
         self.gradient_checkpointing = False
         self.config = config
         self.initialize_weights(num_patches)
@@ -688,14 +681,15 @@ class DiffMAEBottleneckDecoder(nn.Module):
     ):
         # embed visible tokens
         x = self.decoder_embed(hidden_states)
-
         # embed noised patches
         noised_tokens = self.decoder_patch_embeddings(noised_pixel_values)
 
-        # inject shuffled noised tokens in sequence
         len_keep = int(self.num_patches * (1 - self.config.mask_ratio))
         ids_shuffle = torch.argsort(ids_restore, dim=1)
         ids_noised = ids_shuffle[:, len_keep:]
+        ids_keep = ids_shuffle[:, :len_keep]
+
+        # inject shuffled noised tokens in sequence
         noised_tokens = torch.gather(
             noised_tokens, 
             dim=1, 
@@ -706,53 +700,51 @@ class DiffMAEBottleneckDecoder(nn.Module):
         x = torch.cat([x[:, :1, :], x_], dim=1) # append cls token
 
         hidden_states = x + self.decoder_pos_embed
+        
+        if self.strategy is None:
+            # apply Transformer layers (blocks)
+            all_hidden_states = () if output_hidden_states else None
+            all_self_attentions = () if output_attentions else None
+            for i, layer_module in enumerate(self.decoder_layers):
+                if output_hidden_states:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
 
-        # apply Transformer layers (blocks)
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
-        for i, layer_module in enumerate(self.decoder_layers):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            if self.gradient_checkpointing and self.training:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs, output_attentions)
-
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(layer_module),
-                    hidden_states,
-                    None,
-                )
-            else:
                 layer_outputs = layer_module(hidden_states, lengths=lengths, head_mask=None, output_attentions=output_attentions)
 
-            hidden_states = layer_outputs[0]
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+                hidden_states = layer_outputs[0]
+                if output_attentions:
+                    all_self_attentions = all_self_attentions + (layer_outputs[1],)
+
+        else:
+            cls = hidden_states[:, :1, :]
+            context_hidden_states = torch.gather(hidden_states[:, 1:, :], dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, x.shape[2])) # unshuffle
+            hidden_states = torch.gather(hidden_states[:, 1:, :], dim=1, index=ids_noised.unsqueeze(-1).repeat(1, 1, x.shape[2])) # unshuffle
+            # hidden_states = torch.cat([cls, hidden_states], dim=1) # append cls token
+            context_hidden_states = torch.cat([cls, context_hidden_states], dim=1) # append cls token
+
+            # apply Transformer layers (blocks)
+            all_hidden_states = () if output_hidden_states else None
+            all_self_attentions = () if output_attentions else None
+            for i, layer_module in enumerate(self.decoder_layers):
+                if output_hidden_states:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
+
+                layer_outputs = layer_module(hidden_states, context_hidden_states, lengths=lengths, head_mask=None, output_attentions=output_attentions)
+
+                hidden_states = layer_outputs[0]
+                if output_attentions:
+                    all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
         hidden_states = self.decoder_norm(hidden_states)
 
-        if not self.conv:
-            # predictor projection
-            logits = self.decoder_pred(hidden_states)
-            
-            # remove cls token
-            logits = logits[:, 1:, :]
-
-        else:
-            # hidden_states = self.decoder_linear(hidden_states)
-            hidden_states = hidden_states[:, 1:, :]
-            hidden_states = rearrange(hidden_states, 'b (h w) d -> b d h w', h=int(math.sqrt(hidden_states.shape[1])))
-
-            logits = self.decoder_conv(hidden_states)
-            logits = self.pixel_shuffle(logits)
-            logits = rearrange(logits, 'b d h w -> b (h w) d')
+        # predictor projection
+        logits = self.decoder_pred(hidden_states)
+        
+        # remove cls token
+        if self.strategy is None:
+            logits = logits[:, 1:, :] #else the cls token is in the context
 
         return dict(
             logits=logits,
@@ -761,12 +753,12 @@ class DiffMAEBottleneckDecoder(nn.Module):
         )
 
 class DiffMAEBottleneckForPreTraining(ViTMAEPreTrainedModel):
-    def __init__(self, config):
+    def __init__(self, config, strategy):
         super().__init__(config)
         self.config = config
 
         self.vit = ViTMAEBottleneckModel(config)
-        self.decoder = DiffMAEBottleneckDecoder(config, num_patches=self.vit.embeddings.num_patches)
+        self.decoder = DiffMAEBottleneckDecoder(config, num_patches=self.vit.embeddings.num_patches, strategy=strategy)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -928,7 +920,16 @@ class DiffMAEBottleneckForPreTraining(ViTMAEPreTrainedModel):
             )
         logits = decoder_outputs["logits"]  # shape (batch_size, num_patches, patch_size*patch_size*num_channels)
 
-        loss = self.forward_loss(pixel_values, logits, mask)
+        if self.decoder.strategy is not None:
+            len_keep = int(self.decoder.num_patches * (1 - self.config.mask_ratio))
+            ids_shuffle = torch.argsort(ids_restore, dim=1)
+            ids_noised = ids_shuffle[:, len_keep:]
+
+            sequence_masked = torch.gather(self.patchify(pixel_values), dim=1, index=ids_noised.unsqueeze(-1).repeat(1, 1, logits.size(-1)))
+            loss = ((logits - sequence_masked) ** 2).mean()
+
+        else:
+            loss = self.forward_loss(pixel_values, logits, mask)
 
         if not return_dict:
             output = (logits, mask, ids_restore) + outputs[2:]
@@ -942,3 +943,154 @@ class DiffMAEBottleneckForPreTraining(ViTMAEPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+class ViTMAESCrossAttentionModule(ViTMAESelfAttention):
+    def __init__(self, config: ViTMAEConfig) -> None:
+        super().__init__(config)
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+            raise ValueError(
+                f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
+                f"heads {config.num_attention_heads}."
+            )
+
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def forward(
+        self, hidden_states, context_hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        mixed_query_layer = self.query(hidden_states)
+
+        key_layer = self.transpose_for_scores(self.key(context_hidden_states))
+        value_layer = self.transpose_for_scores(self.value(context_hidden_states))
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        # Mask heads if we want to
+        if head_mask is not None:
+            attention_probs = attention_probs * head_mask
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(new_context_layer_shape)
+
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+
+        return outputs
+    
+class ViTMAECrossAttention(ViTMAEAttention):
+    def __init__(self, config: ViTMAEConfig) -> None:
+        super().__init__(config)
+        self.attention = ViTMAESCrossAttentionModule(config)
+        self.output = ViTMAESelfOutput(config)
+        self.pruned_heads = set()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        context_hidden_states: torch.Tensor,
+        head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        self_outputs = self.attention(hidden_states, context_hidden_states, head_mask, output_attentions)
+
+        attention_output = self.output(self_outputs[0], hidden_states)
+
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
+
+class ViTMAEBottleneckCrossLayer(nn.Module):
+    def __init__(self, config, strategy) -> None:
+        super().__init__()
+
+        available_strategies = ['cross-self', 'cross']
+        if strategy not in available_strategies:
+            raise NotImplementedError(
+                f'Strategy {strategy} is not implemented, available strategies are {str(available_strategies)}'
+                )
+        self.strategy = strategy
+
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.cross_attention = ViTMAECrossAttention(config)
+        if self.strategy == 'cross-self':
+            self.attention = ViTMAEAttention(config)
+            self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.intermediate = ViTMAEIntermediate(config)
+        self.output = ViTMAEOutput(config)
+        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_intermediate = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        context_hidden_states: torch.Tensor,
+        lengths,
+        head_mask = None,
+        output_attentions: bool = False,
+    ):
+        #cross-attention
+        cross_attention_outputs = self.cross_attention(
+            self.layernorm_before(hidden_states),  # in ViTMAE, layernorm is applied before self-attention
+            context_hidden_states,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+        )
+        attention_output = cross_attention_outputs[0]
+        outputs = cross_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        # first residual connection
+        hidden_states = attention_output + hidden_states
+
+        #self-attention
+        if self.strategy == 'cross-self':
+            self_attention_outputs = self.attention(
+                self.layernorm_intermediate(hidden_states),  # in ViTMAE, layernorm is applied before self-attention
+                head_mask=head_mask,
+                output_attentions=output_attentions,
+            )
+            attention_output = self_attention_outputs[0]
+
+            # second residual connection
+            hidden_states = attention_output + hidden_states
+
+        # in ViTMAE, layernorm is also applied after self-attention
+        layer_output = self.layernorm_after(hidden_states)
+        layer_output = self.intermediate(layer_output)
+
+        # third residual connection is done here
+        layer_output = self.output(layer_output, hidden_states)
+        
+        # #cls token intra-study inter-images averaging
+        # cls = layer_output[:, :1, :]
+        # index = torch.tensor([idx for idx, l in enumerate(lengths) for _ in range(l)], device=cls.device)
+        # index = index[:, None, None].expand_as(cls)
+        # cls = torch.zeros(lengths.shape[0], *cls.shape[1:], device=cls.device).scatter_add_(0, index, cls) / lengths[:, None, None]
+        # index = index[:, 0, 0]
+        # cls = cls[index]
+        # layer_output = torch.cat([cls, layer_output[:, 1:, :]], dim=1)
+
+
+        outputs = (layer_output,) + outputs
+
+        return outputs

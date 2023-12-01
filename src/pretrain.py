@@ -28,6 +28,8 @@ class VanillaPretrainingModel(pl.LightningModule):
         self.name = CFG.name
         self.config = configs[CFG.config] #Size of the ViT encoder (like 'xs' or 'l')
 
+        self.probe_every = 5
+
         self.model = ViTMAEBottleneckForPreTraining(self.config)
 
     @torch.no_grad()
@@ -145,7 +147,7 @@ class VanillaPretrainingModel(pl.LightningModule):
         auprc_list.append(np.array(auprc_list).mean())
         f1_list.append(np.array(f1_list).mean())
         
-        log_results(pjoin("checkpoints", f"linear_probing_{self.current_epoch}.txt"), self.trainer.train_dataloader.dataset.labels, auroc_list, auprc_list, f1_list)
+        log_results(pjoin("checkpoints", self.name, f"linear_probing_{self.current_epoch}.txt"), self.trainer.train_dataloader.dataset.labels, auroc_list, auprc_list, f1_list)
 
     @torch.no_grad()
     def on_validation_epoch_end(self):
@@ -161,8 +163,11 @@ class VanillaPretrainingModel(pl.LightningModule):
         self.log_reconstructed_images(mixed_image, lengths=self.ref['lengths'])
 
         #perform linear classification to evaluate learned study representations
-        if self.current_epoch % 50 == 0 or self.current_epoch == self.trainer.max_epochs - 1:
+        if self.probe_every % 10 == 0 or self.current_epoch == self.trainer.max_epochs - 1:
             self.linear_probe()
+            self.probe_every = 0
+        else:
+            self.probe_every +=1
 
     @torch.no_grad()
     def norm_patches(self, pixel_values):
@@ -214,7 +219,8 @@ class VanillaPretrainingModel(pl.LightningModule):
 
         self.labels_name = self.trainer.train_dataloader.dataset.labels
         
-        num_training_steps = len(self.trainer.train_dataloader) * self.trainer.max_epochs
+        # num_training_steps = len(self.trainer.train_dataloader) * self.trainer.max_epochs
+        num_training_steps = 353 * self.trainer.max_epochs # for batchsize 512
         num_warmup_steps = int(0.05 * num_training_steps)  # 5% warmup steps
 
         scheduler = get_cosine_schedule_with_warmup(
@@ -279,7 +285,7 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
         self.name = CFG.name
         self.config = configs[CFG.config] #String size of the ViT encoder (e.g 'b', 's'...)
 
-        self.model = DiffMAEBottleneckForPreTraining(self.config)
+        self.model = DiffMAEBottleneckForPreTraining(self.config, strategy=CFG.decoder_type)
 
         self.num_diffusion_steps = 100
         self.num_sparse_diffusion_steps = 1
@@ -384,23 +390,29 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
             logits = decoder_outputs["logits"] #logits are pach-normalized
 
             #add contribution of the diff_idx step to the loss
-            loss.append(self.model.forward_loss(target, logits, mask))
+            if self.CFG.decoder_type is not None:
+                b, t, d = self.model.patchify(target).shape
+                len_keep = int(self.model.decoder.num_patches * (1 - self.model.config.mask_ratio))
+                logits = torch.cat([torch.zeros((b, t-len_keep, d), device=logits.device), logits], dim=1)
+                logits = torch.gather(logits, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, d))  # unshuffle
 
+            partial_loss = self.model.forward_loss(target, logits, mask)
+            loss.append(partial_loss)
+            
             #merge visible and reconstructed patches as input for the next iteration
             if self.config.norm_pix_loss: #rescale the predictions if needed
                 logits = patch_means + logits * (patch_vars + 1.0e-6) ** 0.5
             pixel_values = self.get_mixed_image(pixel_values, logits, mask.unsqueeze(-1))
-            # pixel_values = mixed_image.detach()
 
-        full_loss = torch.stack(loss).mean()
+        mean_loss = torch.stack(loss).mean()
 
-        return pixel_values, full_loss
+        return pixel_values, mean_loss, partial_loss
 
     def forward(self, pixel_values, lengths, noise=None):
         batch_size = pixel_values.size(0)
         t = self.sample_multiple_timesteps(batch_size, self.num_sparse_diffusion_steps)
         
-        logits, loss = self.denoise(pixel_values, lengths, noise=noise, t_seq=t)
+        logits, loss, _ = self.denoise(pixel_values, lengths, noise=noise, t_seq=t)
         return {
             "logits": logits,
             "loss": loss
@@ -411,8 +423,9 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
         pixel_values, lengths = batch['images'], batch['lengths']
         
         #add reconstruction loss corresponding to the full diffusion process
-        _, loss = self.denoise(pixel_values, lengths, t_seq=None)
-        self.log('valid_loss', loss, on_step=False, on_epoch=True)
+        _, mean_loss, full_loss = self.denoise(pixel_values, lengths, t_seq=None)
+        self.log('valid_loss_averaged', mean_loss, on_step=False, on_epoch=True)
+        self.log('valid_loss', full_loss, on_step=False, on_epoch=True)
     
     @torch.no_grad()
     def on_validation_epoch_end(self):
@@ -421,7 +434,7 @@ class DiffusionPretrainingModel(VanillaPretrainingModel):
 
         #perform forward-reverse diffusion on the whole diffusion schedule
         images = self.ref['images']
-        logits, valid_loss = self.denoise(images, lengths=self.ref['lengths'], noise=self.ref['noises'])
+        logits, _, _ = self.denoise(images, lengths=self.ref['lengths'], noise=self.ref['noises'])
 
         if self.config.norm_pix_loss: #comment this to save rescaled reconstructions 
             images, patch_means, patch_vars = self.norm_patches(images)

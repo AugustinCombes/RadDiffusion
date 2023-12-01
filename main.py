@@ -15,13 +15,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--ref_name', type=str, default='untitled', help='Name of the run.')
 parser.add_argument('--scheme', type=str, default="vanilla", help='Scheme used to pretrain the model.')
 parser.add_argument('--num_workers', type=int, default=8, help='Number of workers.')
-parser.add_argument('--device', type=list, default=[0, 1, 2, 3], help='Gpu devices to use.')
+parser.add_argument('--device', type=list, default=[1, 2], help='Gpu devices to use.')
 parser.add_argument('--encoder_size', type=str, default="xs", help='Size of the ViT backbone.')
 args = parser.parse_args()
 
 class PretrainCFG:
     name = args.ref_name
     pretraining_scheme = args.scheme
+    decoder_type = 'cross-self'
     config = args.encoder_size
     batchSize = 512
     epochs = 200

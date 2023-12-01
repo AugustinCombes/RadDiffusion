@@ -130,15 +130,6 @@ class DicomStudyDataset(IterableDataset):
                         continue
 
                 image_ids = filter(lambda x: study_id in x and "txt" not in x, keys)
-                # image = torch.stack(list(map(
-                #     lambda x: self.transform(
-                #         torch.tensor(
-                #             hdf5_file[x][...],
-                #             device=self.device
-                #         ).unsqueeze(0)
-                #     ),
-                #     image_ids
-                #     ))) # [n_image, channels, height, width]
                 image = torch.stack(list(map(
                     lambda x: torch.tensor(
                         hdf5_file[x][...],
